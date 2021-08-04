@@ -1,0 +1,10 @@
+{
+    "domains": [
+        {
+            "username": "USERNAME",
+            "psd": "PASSWORLD",
+            "domain": "java.visualsource.us"
+        }
+    ],
+    "debug": true
+}
