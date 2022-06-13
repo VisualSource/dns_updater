@@ -1,8 +1,9 @@
-name: Rust
+name: Rust Build Release
 
 on:
-  pull_request:
-    branches: [ "release" ]
+  push:
+    branches:
+      - release
 
 env:
   CARGO_TERM_COLOR: always
