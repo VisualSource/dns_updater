@@ -3,6 +3,6 @@
 /current_dns.json
 /config.json
 /*.log
-/test.ts
+test.ts
 /dns_errored.json
 /config.json
