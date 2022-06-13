@@ -1,8 +1,7 @@
 name: Rust Build Release
 on:
-  pull_request:
-    branches:
-      - release
+  release:
+    types: [created]
 jobs:
   release:
     name: release ${{ matrix.target }}
