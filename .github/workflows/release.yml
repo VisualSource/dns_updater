@@ -1,24 +1,54 @@
-name: Rust Build Release
+name: Build & Release
 on:
-  release:
-    types: [created]
+  push:
+    tags:
+      - "v*.*.*"
 jobs:
-  release:
-    name: release ${{ matrix.target }}
+  build:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [x86_64-pc-windows-gnu, x86_64-unknown-linux-musl]
     steps:
-      - uses: actions/checkout@master
-      - name: Compile and release
-        uses: rust-build/rust-build.action@v1.3.2
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Install latest rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          default: true
+          override: true
+      - name: Build
+        run: cargo build --all --release && strip target/release/dns_updater && mv target/release/dns_updater target/release/dns_updater_amd64
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            target/release/dns_updater_amd64
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          RUSTTARGET: ${{ matrix.target }}
-          EXTRA_FILES: "README.md LICENSE"
+  build-win:
+      runs-on: windows-latest
+
+      steps:
+        - name: Checkout
+          uses: actions/checkout@v3
+
+        - name: Install latest rust toolchain
+          uses: actions-rs/toolchain@v1
+          with:
+            toolchain: stable
+            default: true
+            override: true
+
+        - name: Build
+          run: cargo build --all --release
+
+        - name: Release
+          uses: softprops/action-gh-release@v1
+          if: startsWith(github.ref, 'refs/tags/')
+          with:
+            files: target/release/dns_updater.exe
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
      
    
