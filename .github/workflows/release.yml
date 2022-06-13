@@ -1,12 +1,7 @@
-name: Rust
-
+name: Rust Build Release
 on:
-  pull_request:
-    branches: [ "release" ]
-
-env:
-  CARGO_TERM_COLOR: always
-
+  release:
+    types: [created]
 jobs:
   release:
     name: release ${{ matrix.target }}
