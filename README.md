@@ -32,7 +32,7 @@ If the file does not exits it will be created.
 
 A list of domains that have received error responses. excluding error response 911.
 This is done so that the risk of getting your client blocked by google is avoided.
-To reenable a given simpley remove the domain name from the array.
+To reenable a given domain simpley remove the domain name from the array.
 
 ```json
     ["www.example.com"]
