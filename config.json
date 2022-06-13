@@ -4,6 +4,21 @@
             "username": "USERNAME",
             "psd": "PASSWORLD",
             "domain": "java.visualsource.us"
+        },
+        {
+            "username": "USERNAME",
+            "psd": "PASSWORLD",
+            "domain": "bedrock.visualsource.us"
+        },
+        {
+            "username": "USERNAME",
+            "psd": "PASSWORLD",
+            "domain": "next.visualsource.us"
+        },
+        {
+            "username": "USERNAME",
+            "psd": "PASSWORLD",
+            "domain": "visualsource.us"
         }
     ],
     "debug": false

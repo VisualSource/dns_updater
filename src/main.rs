@@ -1,205 +1,224 @@
-extern crate reqwest;
-extern crate chrono;
-#[macro_use] extern crate json;
+mod config;
+mod network;
 
-use chrono::{Utc};
-use json::JsonValue;
-use std::fs::read_to_string;
-use std::fs::write;
-use std::collections::hash_map;
+use config::read_locked_dns;
+use config::write_dns_cache;
+use config::write_locked_dns;
+use network::{get_exteral_ip, format_request};
+use config::{load_config, read_dns_cache};
+use futures::StreamExt;
+use futures::stream;
+use std::collections::HashMap;
+use std::io::ErrorKind;
+use std::io::Error;
+use std::sync::{ Arc, Mutex };
+use chrono::Utc;
+use casual_logger::{Log, Extension, Opt};
 
-fn load_config() -> Result<JsonValue,String> {
-    match read_to_string("./config.json") {
-        Ok(config) => {
-           match json::parse(config.as_str()) {
-               Ok(text) => {
-                   Ok(text)
-               }
-               Err(parse_err) => {
-                   eprintln!("{}",parse_err);
-                   Err(parse_err.to_string())
-               }
-           }
+static APP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"),"/",env!("CARGO_PKG_VERSION"),);
+
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    Log::remove_old_logs();
+    Log::set_file_ext(Extension::Log);
+    Log::set_file_name("");
+    Log::set_opt(Opt::Release);
+    
+    let config = match load_config().await {
+        Ok(value) => value,
+        Err(err) => {
+            Log::fatal(&format!("Failed to load config. | {}",err));
+            return Err(Error::new(ErrorKind::Other,err))
+        }
+    };
+    
+    let ip = match get_exteral_ip().await {
+        Ok(value) => value,
+        Err(err) => {
+            Log::fatal(&format!("Failed to get external ip | {}",err));
+            return Err(Error::new(ErrorKind::Other,err));
+        }
+    };
+    Log::info(&format!("Current external IP: {}",&ip));
+
+    let status_file = include_str!("request.json");
+    let status = match serde_json::from_str::<HashMap<String,String>>(status_file) {
+        Ok(mut value) => {
+
+            value.insert(format!("good {}",&ip), "The update was successful. You should not attempt another update until your IP address changes.".into());
+            value.insert(format!("nochg {}",&ip), "The supplied IP address is already set for this host. You should not attempt another update until your IP address changes.".into());
+            
+            Arc::new(value)
         }
         Err(err) => {
-            write("./config.json", b"{ \"domains\":[], \"debug\": false }").expect("Failed to create config file");
-            eprintln!("{} | Creating new config file.",err);
-            Ok(object!{
-                domains: [],
-                debug: false
-            })
-            
+            Log::fatal("Failed to parse request.json");
+            return Err(Error::new(ErrorKind::Other,err.to_string()));
         }
-    }
-}
+    };
 
-fn get_exteral_ip(debug: bool) -> Result<String, String>   {
-    match reqwest::blocking::get("http://ifconfig.me/ip") {
-        Ok(response) => {
-            match response.text() {
-                Ok(text) => {
-                    if debug {
-                        println!("Exteral IP: {}",text)
-                    }
-                    Ok(text)
-                }
-                Err(parse_err) => {
-                    Err(parse_err.to_string())
-                }
-            }
-        }
-        Err(request_err) => {
-            Err(request_err.to_string())
-        }
-    }
-}
-
-fn create_request(data: &json::JsonValue, ip: &String, debug: bool) -> String {
-    let request = format!("https://{username}:{psd}@domains.google.com/nic/update?hostname={domain}&myip={ip}",
-    ip=ip,
-    domain=data["domain"].as_str().unwrap(),
-    psd=data["psd"].as_str().unwrap(),
-    username=data["username"].as_str().unwrap()
-    ).to_string();
-    if debug {
-        println!("Request: {}",request);
-    }
-    request
-}
-
-fn read_current_dns(debug: bool) -> Result<JsonValue,String> {
-    match read_to_string("./current_dns.json") {
+    let dns_cache = match read_dns_cache().await {
         Ok(value) => {
-            match json::parse(value.as_str()) {
-                Ok(dns) => {
-                    if debug {
-                        println!("{:#?}",dns);
-                    } 
-                    Ok(dns)
+            Arc::new(Mutex::new(value))
+        },
+        Err(err) => {
+            Log::fatal(&format!("Failed to read DNS Cache | {}",err));
+            return Err(Error::new(ErrorKind::Other,err));
+        }
+    };
+
+    let dns_locked = match read_locked_dns().await {
+        Ok(value) => Arc::new(Mutex::new(value)),
+        Err(err) => {
+            Log::fatal(&err);
+            return Err(Error::new(ErrorKind::Other, err));
+        }
+    };
+
+
+    let updates = stream::iter(
+        config.domains.iter().map(|domain|{
+            let external_ip = ip.clone();
+            let arc = dns_cache.clone();
+            let status_msg = status.clone();
+            let errored = dns_locked.clone();
+            async move {
+                
+                match errored.lock() {
+                    Ok(value) => {
+                        if value.contains(&domain.domain) {
+                            let msg = format!("Domain {} had an error and is locked",&domain.domain);
+                            Log::error(&msg);
+                            return Err(msg);
+                        }
+                    }
+                    Err(err) => {
+                        Log::error("Failed to lock");
+                        return Err(err.to_string())
+                    }
                 }
-                Err(err)=> {
-                    Err(err.to_string())
+
+
+                let needs_update = match arc.lock() {
+                    Ok(lock) => {
+                        match lock.get(&domain.domain) {
+                            Some(value) => value.ip != external_ip,
+                            None => true                   
+                        }
+                    }
+                    Err(err) => {
+                        Log::error("Failed to lock");
+                        return Err(err.to_string())
+                    }
+                };
+
+                if !needs_update {
+                    Log::info(&format!("{} is up to date",&domain.domain));
+                    return Ok(());
+                }
+
+                let update_url = format_request(domain);
+                let builder = reqwest::ClientBuilder::new();
+                let client = match builder.user_agent(APP_USER_AGENT).build() {
+                    Ok(value) => value,
+                    Err(err) => {
+                        Log::error(&err.to_string());
+                        return Err(err.to_string());
+                    }
+                };
+                // See https://support.google.com/domains/answer/6147083?hl=en#zippy=%2Cuse-the-api-to-update-your-dynamic-dns-record
+                match client.get(&update_url).send().await {
+                    Ok(res) => {
+                        let stat = res.status();
+                        let text = match res.text().await {
+                            Ok(value) => value,
+                            Err(err) => return Err(err.to_string())
+                        };
+
+                        let msg = match status_msg.get(&text) {
+                            Some(value) => value,
+                            None => &text
+                        };
+                        
+                        if stat.is_success() {
+                            Log::info(msg);
+
+                            match arc.lock() {
+                                Ok(mut lock) => {
+                                    lock.insert(domain.domain.clone(), config::CachedDns::new(external_ip, Utc::now().to_rfc2822()));
+                                }
+                                Err(err) => {
+                                    Log::error("Failed to lock");
+                                    return Err(err.to_string())
+                                }
+                            }
+                        } else {
+
+                            if !msg.contains("911") {
+                                match errored.lock() {
+                                    Ok(mut value) => {
+                                        value.push(domain.domain.clone());
+                                    }
+                                    Err(err) => {
+                                        Log::error("Failed to lock");
+                                        return Err(err.to_string())
+                                    }
+                                }
+                            }
+                            
+                            Log::error(&format!("{} | {}",msg,domain.domain));
+                        }
+                    }
+                    Err(err) => return Err(err.to_string())
+                }
+
+
+                Ok(())
+            }
+        })
+    ).buffer_unordered(8).collect::<Vec<Result<(),String>>>();
+
+
+    updates.await;
+
+    match Arc::try_unwrap(dns_cache) {
+        Ok(arc) => {
+            match arc.into_inner() {
+                Ok(value) => {
+                    if let Err(err) = write_dns_cache(value).await {
+                        Log::fatal(&err);
+                        return Err(Error::new(ErrorKind::Other,err));
+                      }
+                }
+                Err(err) => {
+                    Log::error(&err.to_string());
                 }
             }
         }
         Err(_) => {
-            match write("./current_dns.json", b"{}") {
-                Ok(_) => {
-                    if debug {
-                        println!("Creating file, useing default");
-                    } 
-                    Ok(json::JsonValue::new_object())
-                }
-                Err(io_err) => {
-                    Err(io_err.to_string())
-                }
-            }
+            Log::error("DNS Cache write failed. Failed to unwrap arc");
         }
-    }
-}
+    };
 
-fn main() -> Result<(), String> {
-    let mut request_status = hash_map::HashMap::<String,String>::new();
-    request_status.insert("nohost".to_string(),"The hostname doesn't exist, or doesn't have Dynamic DNS enabled.".to_string());
-    request_status.insert("badauth".to_string(),"The username/password combination isn't valid for the specified host.".to_string());
-    request_status.insert("notfqdn".to_string(),"The supplied hostname isn't a valid fully-qualified domain name.".to_string());
-    request_status.insert("badagent".to_string(),"Your Dynamic DNS client makes bad requests. Ensure the user agent is set in the request.".to_string());
-    request_status.insert("abuse".to_string(),"Dynamic DNS access for the hostname has been blocked due to failure to interpret previous responses correctly.".to_string());
-    request_status.insert("911".to_string(),"An error happened on our end. Wait 5 minutes and retry.".to_string());
-    request_status.insert("conflict A".to_string(),"A custom A or AAAA resource record conflicts with the update. Delete the indicated resource record within the DNS settings page and try the update again.".to_string());
-    request_status.insert("conflict AAAA".to_string(),"A custom A or AAAA resource record conflicts with the update. Delete the indicated resource record within the DNS settings page and try the update again.".to_string());
-
-    let config = load_config().unwrap();
-    let is_debug = config["debug"].as_bool().unwrap();
-
-    let mut dns = read_current_dns(is_debug).unwrap();
-   
-    let ip = get_exteral_ip(is_debug).unwrap();
-
-    request_status.insert(format!("good {}",ip.clone()).to_string(), String::from("The update was successful. You should not attempt another update until your IP address changes."));
-    request_status.insert(format!("nochg {}",ip.clone()).to_string(), String::from("The supplied IP address is already set for this host. You should not attempt another update until your IP address changes."));
-
-
-    for key in config["domains"].members() {
-        let domain_name = key["domain"].to_string();
-        let domain = &dns[domain_name.clone()];
-        if domain["ip"] != ip {
-            dns[domain_name.clone()] = object!{
-                ip: ip.clone(),
-                changed: Utc::now().to_rfc2822()
-            };
-            if is_debug { println!("IP of {} does not match exterial",domain_name.clone()); }
-        }
-        let request = create_request(&key ,&ip, is_debug);
-        if !is_debug { 
-            match reqwest::blocking::get(request) {
+    match Arc::try_unwrap( dns_locked) {
+        Ok(arc) => {
+            match arc.into_inner() {
                 Ok(value) => {
-                    match value.text() {
-                        Ok(result) => {
-                            println!("{}",request_status[&result]);
-                        }
-                        Err(parse_err) => {
-                            eprintln!("HTTP UPDATE REQUEST ERROR: {}",parse_err);
-                        }
+                    if let Err(err) = write_locked_dns(value).await {
+                        Log::fatal(&err);
+                        return Err(Error::new(ErrorKind::Other,err));
                     }
                 }
                 Err(err) => {
-                    eprintln!("HTTP UPDATE REQUEST ERROR: {}",err);
+                    Log::error(&err.to_string());
                 }
             }
         }
-    }
+        Err(_) => {
+            Log::error("DNS Cache write failed. Failed to unwrap arc");
+        }
+    };
 
-    write("./current_dns.json", json::stringify_pretty(dns, 2)).expect("Failed to save current dns.");
-      
+    Log::flush();
     Ok(())
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    #[test]
-    fn test_current_dns_load(){
-        match read_current_dns(true) {
-            Ok(value) => {
-                println!("{}",value);
-            }
-            Err(err) => {
-                eprintln!("{}",err);
-            }
-        }
-    }
-    #[test]
-    fn test_format_request(){
-        match load_config() {
-            Ok(value) => {
-                println!("{:#?}",create_request(&value["domains"][0],&String::from("112.168.1.19"),true));
-            }
-            Err(err) => {
-                eprintln!("ERROR: {}",err);
-            }
-        }
-    }
-    #[test]
-    fn test_yaml_config_load(){
-        match load_config() {
-            Ok(value) => {
-                println!("{:#?}",value["domains"]);
-            }
-            Err(err) => {
-                eprintln!("ERROR: {}",err);
-            }
-        }
-    }
-    #[test]
-    fn test_request_exteral_ip(){
-        match get_exteral_ip(true) {
-            Ok(value) => {
-                println!("{}",value);
-            }
-            Err(err) => {
-                println!("{}",err);
-            }
-        }
-    }
 }
