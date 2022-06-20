@@ -1,6 +1,6 @@
 [package]
 name = "dns_updater"
-version = "0.3.1"
+version = "0.3.2"
 authors = ["VisualSource <boomishere_network@outlook.com>"]
 edition = "2021"
 
