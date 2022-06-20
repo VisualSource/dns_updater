@@ -3,7 +3,7 @@ use crate::config::Domain;
 
 pub fn format_request(domain: &Domain) -> String {
     // og https://domains.google.com
-    format!("https://{username}:{psd}@domains.google.com:8080/nic/update?hostname={domain}",
+    format!("https://{username}:{psd}@domains.google.com/nic/update?hostname={domain}",
     domain=domain.domain,
     psd=domain.psd,
     username=domain.username
