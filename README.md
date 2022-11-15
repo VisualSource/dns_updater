@@ -6,20 +6,19 @@ A simple updater for updating DNS records from a list with the current networks 
 
 #### config.json
 
-The main config file for settings options that the updater will use when running.
+The main config file for setting options that the updater will use when running.
 If the file does not exits it will be created.
 
 ```json
 {
     "domains": [
         {
-            "username": "USERNAME",
+            "usr": "USERNAME",
             "psd": "PASSWORLD",
             "domain": "www.example.com"
         }
     ],  
-    "debug": false
-
+    "debug": false,
 }
 ```
 
@@ -27,6 +26,7 @@ If the file does not exits it will be created.
 | :-------- | :------- | :------------------------- |
 | `domains` | `Array<Object>` | **Required**. The list of domains that are to be updated |
 | `debug`   | `boolean` | **Required**. Debugging output |
+| `debug_ip`| `string` | When debug is true, this is the address used rather then using the networks external address |
 
 #### dns_errored.json
 

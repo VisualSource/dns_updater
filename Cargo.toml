@@ -1,16 +1,18 @@
 [package]
 name = "dns_updater"
-version = "0.3.2"
-authors = ["VisualSource <boomishere_network@outlook.com>"]
+version = "0.4.0"
+authors = ["VisualSource <collin_blosser@yahoo.com>"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-casual_logger = "0.6.5"
+log4rs = "1.2.0"
+log = "0.4.17"
 futures = "0.3.21"
 tokio = { version = "1.19.2", features = ["full"] }
 serde = { version = "1.0.137", features = ["derive"] }
 serde_json = "1.0.81"
+serde_yaml = "0.9.14"
 reqwest = { version = "0.11.11", features = ["json"] }
 chrono = "0.4.19"

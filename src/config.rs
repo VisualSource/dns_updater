@@ -1,11 +1,12 @@
 use std::{path::PathBuf, collections::HashMap};
 use tokio::fs;
-
+use log4rs;
+use serde_yaml;
 use serde::{Deserialize,Serialize };
 
 #[derive(Debug,Deserialize,Serialize)]
 pub struct Domain {
-    pub username: String,
+    pub usr: String,
     pub psd: String,
     pub domain: String
 }
@@ -13,7 +14,8 @@ pub struct Domain {
 #[derive(Debug,Deserialize,Serialize, Default)]
 pub struct Config {
     pub domains: Vec<Domain>,
-    pub debug: bool
+    pub debug: bool,
+    pub debug_ip: Option<String>
 }
 
 #[derive(Debug,Deserialize,Serialize)]
@@ -124,6 +126,13 @@ pub async fn read_locked_dns() ->  Result<Vec<String>,String> {
         },
         Err(err) => Err(err.to_string())   
     }
+}
+
+pub fn init_logger() {
+    let config_str = include_str!("log4rs.yml");
+    let config = serde_yaml::from_str(config_str).expect("Expected to parse logging config.");
+
+    log4rs::init_raw_config(config).expect("Failed to init logging");
 }
 
 #[cfg(test)]

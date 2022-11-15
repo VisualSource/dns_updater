@@ -1,46 +1,49 @@
 mod config;
 mod network;
 
-use config::read_locked_dns;
-use config::write_dns_cache;
-use config::write_locked_dns;
-use network::{get_exteral_ip, format_request};
-use config::{load_config, read_dns_cache};
 use futures::StreamExt;
 use futures::stream;
+use std::time::Duration;
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::io::Error;
 use std::sync::{ Arc, Mutex };
 use chrono::Utc;
-use casual_logger::{Log, Extension, Opt};
+use log::{ info, error, warn };
+use tokio::time::sleep;
+use config::read_locked_dns;
+use config::write_dns_cache;
+use config::write_locked_dns;
+use config::init_logger;
+use network::{get_exteral_ip, format_request};
+use config::{load_config, read_dns_cache};
+
 
 static APP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"),"/",env!("CARGO_PKG_VERSION"),);
 
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    Log::remove_old_logs();
-    Log::set_file_ext(Extension::Log);
-    Log::set_file_name("");
-    Log::set_opt(Opt::Release);
-    
+
+    init_logger();
+   
     let config = match load_config().await {
         Ok(value) => value,
         Err(err) => {
-            Log::fatal(&format!("Failed to load config. | {}",err));
+            error!("Failed to load config file! | {}",err);
             return Err(Error::new(ErrorKind::Other,err))
         }
     };
     
-    let ip = match get_exteral_ip().await {
+    let ip = match get_exteral_ip(&config).await {
         Ok(value) => value,
         Err(err) => {
-            Log::fatal(&format!("Failed to get external ip | {}",err));
+            error!("Failed to fetch external ip | {}", err);
             return Err(Error::new(ErrorKind::Other,err));
         }
     };
-    Log::info(&format!("Current external IP: {}",&ip));
+
+    info!("Current external IP({})",ip);
 
     let status_file = include_str!("request.json");
     let status = match serde_json::from_str::<HashMap<String,String>>(status_file) {
@@ -52,7 +55,7 @@ async fn main() -> std::io::Result<()> {
             Arc::new(value)
         }
         Err(err) => {
-            Log::fatal("Failed to parse request.json");
+            error!("Failed to parse network responses.");
             return Err(Error::new(ErrorKind::Other,err.to_string()));
         }
     };
@@ -62,7 +65,7 @@ async fn main() -> std::io::Result<()> {
             Arc::new(Mutex::new(value))
         },
         Err(err) => {
-            Log::fatal(&format!("Failed to read DNS Cache | {}",err));
+            error!("Failed to load DNS Cache File | {}", err);
             return Err(Error::new(ErrorKind::Other,err));
         }
     };
@@ -70,36 +73,35 @@ async fn main() -> std::io::Result<()> {
     let dns_locked = match read_locked_dns().await {
         Ok(value) => Arc::new(Mutex::new(value)),
         Err(err) => {
-            Log::fatal(&err);
+            error!("Failed to load DNS Locked File | {}", err);
             return Err(Error::new(ErrorKind::Other, err));
         }
     };
 
-
     let updates = stream::iter(
         config.domains.iter().map(|domain|{
             let external_ip = ip.clone();
-            let arc = dns_cache.clone();
-            let status_msg = status.clone();
-            let errored = dns_locked.clone();
+            let cache = dns_cache.clone();
+            let locked = dns_locked.clone();
+            let status_msgs = status.clone();
+           
             async move {
                 
-                match errored.lock() {
+                match locked.lock() {
                     Ok(value) => {
                         if value.contains(&domain.domain) {
-                            let msg = format!("Domain {} had an error and is locked",&domain.domain);
-                            Log::error(&msg);
-                            return Err(msg);
+                            warn!("Domain {} was not updated due to being locked.",domain.domain);
+                            return Err("Failed to update due to lock.".to_string());
                         }
                     }
                     Err(err) => {
-                        Log::error("Failed to lock");
+                        error!("Failed to optain a lock | {}", err);
                         return Err(err.to_string())
                     }
                 }
 
 
-                let needs_update = match arc.lock() {
+                let needs_update = match cache.lock() {
                     Ok(lock) => {
                         match lock.get(&domain.domain) {
                             Some(value) => value.ip != external_ip,
@@ -107,25 +109,26 @@ async fn main() -> std::io::Result<()> {
                         }
                     }
                     Err(err) => {
-                        Log::error("Failed to lock");
+                        error!("Failed to optain a lock | {}", err);
                         return Err(err.to_string())
                     }
                 };
 
                 if !needs_update {
-                    Log::info(&format!("{} is up to date",&domain.domain));
+                    info!("Domain {} is up to date.", domain.domain);
                     return Ok(());
                 }
 
-                let update_url = format_request(domain);
+                let update_url = format_request(domain,&external_ip);
                 let builder = reqwest::ClientBuilder::new();
                 let client = match builder.user_agent(APP_USER_AGENT).build() {
                     Ok(value) => value,
                     Err(err) => {
-                        Log::error(&err.to_string());
+                        error!("{}",err.to_string());
                         return Err(err.to_string());
                     }
                 };
+
                 // See https://support.google.com/domains/answer/6147083?hl=en#zippy=%2Cuse-the-api-to-update-your-dynamic-dns-record
                 match client.get(&update_url).send().await {
                     Ok(res) => {
@@ -135,48 +138,56 @@ async fn main() -> std::io::Result<()> {
                             Err(err) => return Err(err.to_string())
                         };
 
-                        let msg = match status_msg.get(&text) {
+                        let parsed_response = match status_msgs.get(&text) {
                             Some(value) => value,
                             None => &text
                         };
-                        
-                        if stat.is_success() {
-                            Log::info(msg);
 
-                            match arc.lock() {
+                        // Something happend server side, most likely.
+                        // stop system from writing it to a cache file
+                        if text.contains("911") {
+                            error!("Domain({}) | {}", domain.domain,parsed_response);
+                            return Ok(());
+                        }
+
+                        if stat.is_success() {
+
+                            info!("Domain ({}) | {}",domain.domain,parsed_response);
+
+                            match cache.lock() {
                                 Ok(mut lock) => {
                                     lock.insert(domain.domain.clone(), config::CachedDns::new(external_ip, Utc::now().to_rfc2822()));
                                 }
                                 Err(err) => {
-                                    Log::error("Failed to lock");
+                                    error!("Failed to optain a lock. | {}", err);
                                     return Err(err.to_string())
                                 }
                             }
+
                         } else {
 
-                            if !msg.contains("911") {
-                                match errored.lock() {
-                                    Ok(mut value) => {
-                                        value.push(domain.domain.clone());
-                                    }
-                                    Err(err) => {
-                                        Log::error("Failed to lock");
-                                        return Err(err.to_string())
-                                    }
+                             error!("Domain({}) | {}", domain.domain, parsed_response);
+
+                             match locked.lock() {
+                                Ok(mut value) => {
+                                    value.push(domain.domain.clone());
+                                }
+                                Err(err) => {
+                                    error!("Failed to optain a lock. | {}", err);
+                                    return Err(err.to_string())
                                 }
                             }
-                            
-                            Log::error(&format!("{} | {}",msg,domain.domain));
                         }
                     }
                     Err(err) => return Err(err.to_string())
                 }
 
 
+                sleep(Duration::from_secs(2)).await;
                 Ok(())
             }
         })
-    ).buffer_unordered(8).collect::<Vec<Result<(),String>>>();
+    ).buffered(1).collect::<Vec<Result<(),String>>>();
 
 
     updates.await;
@@ -186,17 +197,17 @@ async fn main() -> std::io::Result<()> {
             match arc.into_inner() {
                 Ok(value) => {
                     if let Err(err) = write_dns_cache(value).await {
-                        Log::fatal(&err);
+                        error!("Failed to write DNS Cache file | {}",err);
                         return Err(Error::new(ErrorKind::Other,err));
                       }
                 }
                 Err(err) => {
-                    Log::error(&err.to_string());
+                    error!("Failed to optain a lock | {}", err);
                 }
             }
         }
         Err(_) => {
-            Log::error("DNS Cache write failed. Failed to unwrap arc");
+            error!("Failed to write DNS Cache File");
         }
     };
 
@@ -205,20 +216,19 @@ async fn main() -> std::io::Result<()> {
             match arc.into_inner() {
                 Ok(value) => {
                     if let Err(err) = write_locked_dns(value).await {
-                        Log::fatal(&err);
+                        error!("Failed to write Locked DNS file | {}", err);
                         return Err(Error::new(ErrorKind::Other,err));
                     }
                 }
                 Err(err) => {
-                    Log::error(&err.to_string());
+                    error!("Failed to optain a lock | {}", err);
                 }
             }
         }
         Err(_) => {
-            Log::error("DNS Cache write failed. Failed to unwrap arc");
+            error!("Failed to write DNS Lock file");
         }
     };
 
-    Log::flush();
     Ok(())
 }
