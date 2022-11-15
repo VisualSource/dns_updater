@@ -1,24 +1,9 @@
 {
     "domains": [
         {
-            "username": "USERNAME",
+            "usr": "USERNAME",
             "psd": "PASSWORLD",
-            "domain": "java.visualsource.us"
-        },
-        {
-            "username": "USERNAME",
-            "psd": "PASSWORLD",
-            "domain": "bedrock.visualsource.us"
-        },
-        {
-            "username": "USERNAME",
-            "psd": "PASSWORLD",
-            "domain": "next.visualsource.us"
-        },
-        {
-            "username": "USERNAME",
-            "psd": "PASSWORLD",
-            "domain": "visualsource.us"
+            "domain": "www.example.com"
         }
     ],
     "debug": false
